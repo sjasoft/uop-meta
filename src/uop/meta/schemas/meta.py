@@ -1,3 +1,5 @@
+from math import dist
+import attr
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict, ClassVar
 from pydantic import Field, root_validator
@@ -9,7 +11,7 @@ from sjasoft.utils.dicts import first_kv, DictObject
 from sjasoft.utils.string import after
 import random
 from functools import partial
-from collections import defaultdict
+from collections import defaultdict, deque
 
 make_app_id = lambda: index.make_id(48)
 
@@ -296,10 +298,13 @@ class MetaClass(NameWithId):
         :param super_name: name of superclass
         :return:  the newly created MetaClass
         """
+        super_attributes = []
+ 
+        
         num_attrs = random.randint(2, 8)
         name = f"Class_{random.randint(1000, 9999)}"
-        attributes = [MetaAttribute.random_attribute() for _ in range(num_attrs)]
-        return cls(superclass=super_name, name=name, attributes=attributes)
+        attributes = super_attributes + [MetaAttribute.random_attribute() for _ in range(num_attrs)]
+        return cls(superclass=super_name, name=name, attrs=[a.id for a in attributes], attributes=attributes)
 
     @classmethod
     def create_random(cls, **kwargs):
@@ -790,6 +795,24 @@ class MetaContext(BaseModel):
 
         class_mods = changes.classes.modified
 
+    def process_class(self, cls: MetaClass):
+        by_name = self.classes.by_name
+        attr_by_id = self.attributes.by_id
+        c_attrs = deque()
+        c_attributes = deque()
+        if cls.attributes and not cls.attrs:
+            cls.attrs = [a.id for a in cls.attributes]
+        working = cls
+        while working and working.attrs:
+            for a_id in working.attrs[::-1]:
+                if a_id not in c_attrs:
+                    c_attrs.appendleft(a_id)
+                    c_attributes.appendleft(attr_by_id[a_id])
+            working = by_name[working.superclass] if working.superclass else None
+
+        cls.attrs = list(c_attrs)
+        cls.attributes = list(c_attributes)
+
     def complete_classes(self):
         """
         1) ensures both attr_ids and attributes exist in classes
@@ -798,26 +821,12 @@ class MetaContext(BaseModel):
         """
         from collections import deque
 
-        processed = set()
         by_name = self.classes.by_name
         attr_by_id = self.attributes.by_id
 
-        def process_class(cls):
-            c_attrs = deque()
-            c_attributes = deque()
-            working = cls
-            while working:
-                for a_id in working.attrs[::-1]:
-                    if a_id not in c_attrs:
-                        c_attrs.appendleft(a_id)
-                        c_attributes.appendleft(attr_by_id[a_id])
-                working = by_name[working.superclass] if working.superclass else None
-
-            cls.attrs = list(c_attrs)
-            cls.attributes = list(c_attributes)
 
         for cls in self.classes.by_id.values():
-            process_class(cls)
+            self.process_class(cls)
 
     def by_name_id(self, kind):
         return getattr(self, kind)
@@ -1007,9 +1016,6 @@ class Associated(BaseModel):
 class Related(Associated):
     kind = "related"
     subject_id: str = Field(..., description="subject of relationship")
-
-    def hash_string(self):
-        return f"{self.assoc_id}:{self.object_id}:{self.subject_id}"
 
     def __hash__(self):
         return hash(self.hash_string())
@@ -1363,8 +1369,14 @@ class WorkingContext(MetaContext):
         return random.choice(self.instances)
 
     def random_new_class(self):
-        return MetaClass.random_class()
-
+        cls = MetaClass.random_class()
+        for a in cls.attributes:
+            self.add(a)
+        self.add(cls)
+        self.process_class(cls)
+        return cls
+    
+    
     def random_class(self):
         "returns crandom cls id from existing classes"
         vals = [v for v in self.classes.by_id.values() if not v.is_abstract]
@@ -1382,13 +1394,13 @@ class WorkingContext(MetaContext):
     def random_kind(self, kind):
         return getattr(self, f"random_{kind}")
 
-    def distinct_pair(self, kind, constraint=None):
+    def distinct_of_kind(self, kind, num, constraint=None):
         all_available = self.all_of_kind(kind)
         if constraint:  # TODO fix this
             all_available = [a for a in all_available if constraint(a)]
-        first = random.choice(all_available)
-        rest = [a for a in all_available if a.id != first.id]
-        return first, random.choice(rest)
+        return random.sample(all_available, num)
+    def distinct_pair(self, kind, constraint=None):
+        return self.distinct_of_kind(kind, 2, constraint) 
 
     def random_tagged(self, tag_id=None, obj_id=None):
         role_id = self.roles.name_to_id("tag_applies")
