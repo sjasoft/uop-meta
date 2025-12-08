@@ -443,6 +443,9 @@ class MetaRole(NameWithId):
     def create_random(cls):
         return cls(name=f"role_{random.randint(1000, 9999)}")
 
+    def get_changes(self, other, changes):
+        super().get_changes(other, changes.roles)
+
 
 class MetaGroup(NameWithId):
     kind = "groups"
