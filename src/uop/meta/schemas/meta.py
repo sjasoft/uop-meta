@@ -299,12 +299,18 @@ class MetaClass(NameWithId):
         :return:  the newly created MetaClass
         """
         super_attributes = []
- 
-        
+
         num_attrs = random.randint(2, 8)
         name = f"Class_{random.randint(1000, 9999)}"
-        attributes = super_attributes + [MetaAttribute.random_attribute() for _ in range(num_attrs)]
-        return cls(superclass=super_name, name=name, attrs=[a.id for a in attributes], attributes=attributes)
+        attributes = super_attributes + [
+            MetaAttribute.random_attribute() for _ in range(num_attrs)
+        ]
+        return cls(
+            superclass=super_name,
+            name=name,
+            attrs=[a.id for a in attributes],
+            attributes=attributes,
+        )
 
     @classmethod
     def create_random(cls, **kwargs):
@@ -550,7 +556,7 @@ def sys_class(
     )
 
 
-class BaseSchema(BaseModel):
+class Schema(BaseModel):
     name: str
     classes: List[MetaClass] = []
     attributes: List[MetaAttribute] = []
@@ -558,16 +564,7 @@ class BaseSchema(BaseModel):
     tags: List[MetaTag] = []
     groups: List[MetaGroup] = []
     queries: List[MetaQuery] = []
-
-
-class DBFormSchema(BaseSchema):
-    uses_schemas: List[str] = []
     requires_schemas: List[str] = []
-
-
-class Schema(BaseSchema):
-    uses_schemas: List["Schema"] = []
-    requires_schemas: List["Schema"] = []
 
     @classmethod
     def core_schema(cls):
@@ -586,54 +583,6 @@ class Schema(BaseSchema):
             ],
         )
 
-    @classmethod
-    def schemas_from_db(cls, db_schemas: List[dict]):
-        # shouldn't this be actually in uop.database?
-        db_form_schemas = {s["name"]: DBFormSchema(**s) for s in db_schemas}
-        schemas = {}
-
-        def transformed(name):
-            known = schemas.get(name)
-            if not known:
-                db_schema: DBFormSchema = db_form_schemas.get(name)
-                if db_schema:
-                    transform = dict(
-                        uses_schemas=[transformed(n) for n in db_schema.uses_schemas],
-                        requires_schemas=[
-                            transformed(n) for n in db_schema.requires_schemas
-                        ],
-                    )
-                    data = db_schema.dict()
-                    data.update(transform)
-                    known = schemas[name] = cls(**data)
-                else:
-                    raise Exception(f"unknown schema named {name}")
-            return known
-
-        transformed_schemas = [transformed(d["name"]) for d in db_schemas]
-        return schemas
-
-    def sub_schemas(self):
-        subs = {}
-
-        def add_subs(sub_list):
-            for s in sub_list:
-                if s.name not in subs:
-                    subs[s.name] = s
-                    subs.update(s.sub_schemas())
-
-        add_subs(self.uses_schemas)
-        add_subs(self.requires_schemas)
-        return subs
-
-    def db_form(self):
-        uses = [u.name for u in self.uses_schemas]
-        requires = [r.name for r in self.requires_schemas]
-        data = self.dict()
-        data["uses_schemas"] = uses
-        data["requires_schemas"] = requires
-        return DBFormSchema(**data)
-
     @root_validator
     def root_validate(cls, values):
         attr_map = {a.id: a for a in values["attributes"]}
@@ -647,7 +596,7 @@ class Schema(BaseSchema):
 
         if not values["requires_schemas"]:
             if values["name"] != "uop_core":
-                values["requires_schemas"] = [cls.core_schema()]
+                values["requires_schemas"] = ["uop_core"]
 
         return values
 
@@ -673,9 +622,22 @@ class MetaContext(BaseModel):
                     res[sid].add(cid)
             self.class_children = res
 
+    def has_subclasses(self, cls_id):
+        return cls_id in self.class_children
+        return any(sid in self.class_children for sid in self.class_children[cls_id])
+
+    def has_subclasses(self, cls_id):
+        return cls_id in self.class_children
+        return any(sid in self.class_children for sid in self.class_children[cls_id])
+
+    def has_subclasses(self, cls_id):
+        if not self.class_children:
+            self.get_class_children()
+        return cls_id in self.class_children
+
     def deep_copy(self):
         instance = self.__class__()
-        for kind in kind_map:
+        for kind in meta_kinds:
             instance.load_objects(self.metas_of_kind(kind))
         instance.complete()
         return instance
@@ -733,8 +695,49 @@ class MetaContext(BaseModel):
         instance.complete()
         return instance
 
+    def gather_schema_changes(self, schema: Schema, changes):
+        added = defaultdict(set)
+
+        def add_kind(kind, item):
+            known = getattr(self, kind).by_name
+            creator = kind_map[kind]
+            if item.name not in known:
+                self.add(creator(**item.dict()))
+                added[kind].add(item.id)
+
+        for c in schema.classes:
+            if c.name not in self.classes.by_name:
+                self.add(MetaClass(**c.dict()))
+                added["classes"].add(c.id)
+                for attribute in c.attributes:
+                    self.add(MetaAttribute(**attribute.dict()))
+                    added["attributes"].add(attribute.id)
+        for kind in ["groups", "tags", "roles", "queries"]:
+            items = getattr(schema, kind)
+            for item in items:
+                add_kind(kind, item)
+
+        def without_kind(item: NameWithId):
+            d = item.dict()
+            d.pop("kind", None)
+            return d
+
+        self.complete()
+
+        for kind, ids in added.items():
+            change_kind = getattr(changes, kind)
+            kind_dict = self.by_id(kind)
+            items = [kind_dict[i] for i in ids]
+            for item in items:
+                change_kind.insert(without_kind(item))
+
     @classmethod
-    def from_schema(cls, schema: Schema):
+    def from_schema(cls, schema: Schema, existing_context=None):
+        """
+        Note that a true metacontext is only possible add the point of processing classes which requires completeness schema or that we add items from exisitng context as well.
+        This means we must only add things not in existing context if there is one.
+        It also means it is not safe to process attributes raw instead of from class.
+        """
         instance = cls()
 
         def add_schema(a_schema: Schema):
@@ -765,21 +768,15 @@ class MetaContext(BaseModel):
     def complete(self):
         # TODOa  maybe mae this a root validator?
         self.complete_classes()
-        self.complete_groups()
 
-    def gather_schema_changes(self, a_schema: Schema, changes):
+    def gather_context_changes(self, other: "MetaContext", changes):
         def handle_kind(kind):
             change_kind = getattr(changes, kind)
             context_kind = getattr(self, kind).by_name
-            instances = getattr(a_schema, kind)
-            names = [i.name for i in instances]
-            # DO NOT delete things outside the schema!!
-            # missing = [v.id for k,v in context_kind.items() if k not in names]
-            # for an_id in missing:
-            #     change_kind.delete(an_id)
+            other_kind = getattr(other, kind).by_name
 
-            for instance in instances:
-                c_instance = context_kind.get(instance.name)
+            for name, instance in other_kind.items():
+                c_instance = context_kind.get(name)
                 if c_instance:
                     c_instance.get_changes(instance, changes)
                 else:
@@ -787,30 +784,30 @@ class MetaContext(BaseModel):
                     data.pop("kind", None)
                     change_kind.insert(data)
 
-        subschemas = a_schema.uses_schemas + a_schema.requires_schemas
-        for sub in subschemas:
-            self.gather_schema_changes(sub, changes)
-
         handle_kind("attributes")
         remaining = [k for k in meta_kinds if k != "attributes"]
         for kind in remaining:
             handle_kind(kind)
 
-        class_mods = changes.classes.modified
-
     def process_class(self, cls: MetaClass):
         by_name = self.classes.by_name
         attr_by_id = self.attributes.by_id
         c_attrs = deque()
+        if isinstance(cls, dict):
+            print("what the hell is this?")
         c_attributes = deque()
         if cls.attributes and not cls.attrs:
             cls.attrs = [a.id for a in cls.attributes]
         working = cls
+        processed = set()
         while working and working.attrs:
+            processed.add(working.name)
             for a_id in working.attrs[::-1]:
                 if a_id not in c_attrs:
                     c_attrs.appendleft(a_id)
                     c_attributes.appendleft(attr_by_id[a_id])
+            if working.superclass and (working.superclass not in by_name):
+                print(f"superclass {working.superclass} not found for {working.name}")
             working = by_name[working.superclass] if working.superclass else None
 
         cls.attrs = list(c_attrs)
@@ -822,12 +819,6 @@ class MetaContext(BaseModel):
         2) ensures each class' attributes includs suppeclass attributes
         3) ensures self.attributes is filled in from attributes of classes
         """
-        from collections import deque
-
-        by_name = self.classes.by_name
-        attr_by_id = self.attributes.by_id
-
-
         for cls in self.classes.by_id.values():
             self.process_class(cls)
 
@@ -859,6 +850,8 @@ class MetaContext(BaseModel):
             self.add(object)
 
     def add(self, object: NameWithId):
+        if isinstance(object, dict):
+            print("what the hell is this?")
         kind = object.kind
         self.by_id(kind)[object.id] = object
         self.by_name(kind)[object.name] = object
@@ -1378,8 +1371,7 @@ class WorkingContext(MetaContext):
         self.add(cls)
         self.process_class(cls)
         return cls
-    
-    
+
     def random_class(self):
         "returns crandom cls id from existing classes"
         vals = [v for v in self.classes.by_id.values() if not v.is_abstract]
@@ -1402,8 +1394,9 @@ class WorkingContext(MetaContext):
         if constraint:  # TODO fix this
             all_available = [a for a in all_available if constraint(a)]
         return random.sample(all_available, num)
+
     def distinct_pair(self, kind, constraint=None):
-        return self.distinct_of_kind(kind, 2, constraint) 
+        return self.distinct_of_kind(kind, 2, constraint)
 
     def random_tagged(self, tag_id=None, obj_id=None):
         role_id = self.roles.name_to_id("tag_applies")
@@ -1479,7 +1472,7 @@ kind_map = dict(
     related=Related,
     users=User,
     databases=Database,
-    schemas=DBFormSchema,  # TODO ferret out how these load
+    schemas=Schema,  # TODO ferret out how these load
     tenants=Tenant,
     changes=MetaChanges,
 )
@@ -1514,6 +1507,12 @@ root = MetaClass(
 
 core_schema = Schema(
     name="uop_core",
+    roles=[
+        MetaRole(name="group_contains", reverse_name="group_contains*"),
+        MetaRole(name="tag_applies", reverse_name="tag_applies*"),
+        MetaRole(name="contains_group", reverse_name="contains_group*"),
+        MetaRole(name="has_user", reverse_name="in_tenant"),
+    ],
     classes=[
         root,
         sys_class(
@@ -1526,3 +1525,5 @@ core_schema = Schema(
         ),
     ],
 )
+
+known_schemas = {"uop_core": core_schema}
