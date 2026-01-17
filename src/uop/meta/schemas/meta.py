@@ -52,7 +52,7 @@ base_types = {
 
 
 def pydantic_uop_type(pydantic_type, outer_type):
-    if (outer_type != pydantic_type) and outer_type == "List":
+    if (outer_type != pydantic_type) and str(outer_type).startswith("typing.List"):
         return "json"
     if isinstance(pydantic_type, str):
         return "str"
@@ -225,6 +225,7 @@ class NameWithId(BaseModel):
         data = self.dict()
         data.pop("kind", None)
         return data
+    
 
     @classmethod
     def create_random(cls, **kwargs):
@@ -289,6 +290,9 @@ class MetaClass(NameWithId):
     is_abstract: bool = False
     mandatory_attributes: List[str] = []
 
+    def uop_types(self):
+        return {a.name: a.type for a in self.attributes}
+    
     @classmethod
     def random_class(cls, super_name="PersistentObject"):
         """
