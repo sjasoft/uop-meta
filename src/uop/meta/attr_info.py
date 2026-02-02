@@ -6,7 +6,7 @@ import datetime
 
 uuid_attr_id = "1"
 
-crud_kinds = ["objects", "classes", "attributes", "roles", "tags", "groups", "queries"]
+crud_kinds = ["objects", "classes", "roles", "tags", "groups", "queries"]
 
 meta_kinds = crud_kinds[1:]
 

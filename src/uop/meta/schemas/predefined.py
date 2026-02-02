@@ -33,7 +33,7 @@ pkm_schema = Schema(
             meta.app_attr("street_address1", "string", required=True),
             meta.app_attr("street_address2", "string"),
             meta.app_attr("city", "string", required=True),
-            meta.app_attr("state/province", "string", required=True),
+            meta.app_attr("state_province", "string", required=True),
             meta.app_attr("country", "string", required=True),
             meta.app_attr("postal_zip", "string"),
         ),
